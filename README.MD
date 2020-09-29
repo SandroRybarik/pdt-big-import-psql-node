@@ -9,3 +9,6 @@ Twitter dataset importer
 1. OPTIONAL: change BATCH_SIZE variable in _import.js_ default = 50000
 1. run `node import.js <db_name> pdt_datasets/`
 1. run `node import-fix-constraints.js <db_name>`
+
+# Notes
+During runtime program makes json dumps of internal state. Its useful if there is an interrupt during import. Ask author how to use it when necessary. Feel free to delete them if there was no error. 
