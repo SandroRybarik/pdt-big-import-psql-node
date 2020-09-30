@@ -12,8 +12,7 @@ const { exit } = require('process');
 const BATCH_SIZE = 50000
 
 // from: https://nodejs.org/api/readline.html#readline_example_read_file_stream_line_by_line
-function processLineByLine(fileName, client, hashtagsState, countriesState) {
-  return new Promise(async (resolve, _) => {
+async function processLineByLine(fileName, client, hashtagsState, countriesState) {
     const fileStream =  fs.createReadStream(fileName);
 
     const rl = readline.createInterface({
@@ -278,8 +277,7 @@ function processLineByLine(fileName, client, hashtagsState, countriesState) {
     await fs.promises.writeFile('dump-hashtags-map.json', JSON.stringify(hashtagsState), 'utf-8')
     await fs.promises.writeFile('dump-countries-map.json', JSON.stringify(countriesState), 'utf-8')
 
-    resolve(numOfRecords)
-  })
+    return numOfRecords
 }
 
 async function main() {
@@ -292,7 +290,7 @@ async function main() {
   
   // Filter hidden files aka .DS_Store
   const datasetFileNames = [
-    ...datasetFileNamesAll.filter(f => f[0] !== '.').map(f => path.join("./pdt_dataset", f))
+    ...datasetFileNamesAll.filter(f => f[0] !== '.').map(f => path.join(process.argv[3], f))
   ]
 
   const fileNames = datasetFileNames
