@@ -9,7 +9,69 @@ const format = require('pg-format');
 const { exit } = require('process');
 
 
-const BATCH_SIZE = 50000
+const BATCH_SIZE = 100_000
+
+// create values string from twitter object - to
+const tweetValueString = (to, country_id) =>
+  to.coordinates ? 
+    format('(%1$L, %2$L, ST_SetSRID(ST_MakePoint(%3$L,%4$L),4326), %5$L, %6$L, %7$L, %8$L, %9$L, %10$L)',
+      to.id_str, to.full_text, to.coordinates.coordinates[0], to.coordinates.coordinates[1], to.retweet_count, to.favorite_count, to.created_at, to.user.id, country_id, (to.retweeted_status ? to.retweeted_status.id_str : null)
+    )
+    :
+    format('(%1$L, %2$L, %3$L, %4$L, %5$L, %6$L, %7$L, %8$L, %9$L)',
+      to.id_str, to.full_text, null, to.retweet_count, to.favorite_count, to.created_at, to.user.id, country_id, (to.retweeted_status ? to.retweeted_status.id_str : null)
+    )
+
+// Executes single batch
+async function executeBatchAndEmpty(client, qvb) {
+  const {
+    qh_tweets, qt_tweets, tweets,
+    qh_accounts, qt_accounts, accounts,
+    qh_tweet_mentions, qt_tweet_mentions, tweet_mentions,
+    qh_tweet_hashtags, qt_tweet_hashtags, tweet_hashtags,
+    qh_hashtags, qt_hashtags, hashtags,
+    qh_countries, qt_countries, countries
+  } = qvb
+
+  if (tweets.length > 0) {
+    await client.query(
+      qh_tweets + " " + tweets.join(", ") + " " + qt_tweets
+    )
+  }
+  if (accounts.length > 0) {
+    await client.query(
+      qh_accounts + " " + accounts.join(", ") + " " + qt_accounts
+    )
+  }
+  if (tweet_mentions.length > 0) {
+    await client.query(
+      qh_tweet_mentions + " " + tweet_mentions.join(", ") + " " + qt_tweet_mentions
+    )
+  }
+  if (tweet_hashtags.length > 0) {
+    await client.query(
+      qh_tweet_hashtags + " " + tweet_hashtags.join(", ") + " " + qt_tweet_hashtags
+    )
+  }
+  if (hashtags.length > 0) {
+    await client.query(
+      qh_hashtags + " " + hashtags.join(", ") + " " + qt_hashtags
+    )
+  }
+  if (countries.length > 0) {
+    await client.query(
+      qh_countries + " " + countries.join(", ") + " " + qt_countries
+    )
+  }
+
+  // resets all to []
+  qvb.tweets = []
+  qvb.accounts = []
+  qvb.tweet_mentions = []
+  qvb.tweet_hashtags = []
+  qvb.hashtags = []
+  qvb.countries = []
+}
 
 // from: https://nodejs.org/api/readline.html#readline_example_read_file_stream_line_by_line
 async function processLineByLine(fileName, client, hashtagsState, countriesState) {
@@ -20,12 +82,16 @@ async function processLineByLine(fileName, client, hashtagsState, countriesState
       crlfDelay: Infinity
     });
 
+    // logging purposes
     let numOfRecords = 0;
     
     // BATCHING
     let batchCounter = 0
 
-    let queriesValueBatch = {
+    // This object is used to craft all queries in single batch execution
+    // qh - query head
+    // qt - query tail
+    const queriesValueBatch = {
       qh_tweets: "INSERT INTO tweets(id, content, location, retweet_count, favorite_count, happened_at, author_id, country_id, parent_id) VALUES ",
       qt_tweets: "ON CONFLICT DO NOTHING",
       tweets: [],
@@ -51,13 +117,23 @@ async function processLineByLine(fileName, client, hashtagsState, countriesState
       countries: []
     }
 
-    // depends on countriesMap, hashtagsMap
-    // tweet_hashtags, hashtags, countries
     try {
       // START OF SINGLE BATCH
       for await (const line of rl) {
-        const to = JSON.parse(line) // twitter object
-        const hashtags = to.entities.hashtags
+        const twObj = JSON.parse(line) // twitter object
+
+        // we maybe need to process these object twice
+        const processObjs = [twObj]
+        if (twObj.retweeted_status) {
+          processObjs.push(twObj.retweeted_status)
+          if (twObj.retweeted_status["retweeted_status"]) {
+            console.log("Retweeted_status recursion?!")
+          }
+        }
+
+        for (const to of processObjs) {
+
+          const hashtags = to.entities.hashtags
           
           let country_id = null
           if (to.place) {
@@ -73,44 +149,33 @@ async function processLineByLine(fileName, client, hashtagsState, countriesState
             }
           }
 
-
-          if (to.coordinates) {
-            queriesValueBatch.tweets.push(
-              format('(%1$L, %2$L, ST_SetSRID(ST_MakePoint(%3$L,%4$L),4326), %5$L, %6$L, %7$L, %8$L, %9$L, %10$L)',
-                to.id_str, to.full_text, to.coordinates.coordinates[0], to.coordinates.coordinates[1], to.retweet_count, to.favorite_count, to.created_at, to.user.id, country_id, (to.retweeted_status ? to.retweeted_status.id_str : null)
-              )
-            )
-          }
-          else {
-            queriesValueBatch.tweets.push(
-              format('(%1$L, %2$L, %3$L, %4$L, %5$L, %6$L, %7$L, %8$L, %9$L)',
-                to.id_str, to.full_text, null, to.retweet_count, to.favorite_count, to.created_at, to.user.id, country_id, to.retweeted_status ? to.retweeted_status.id_str : null
-              )
-            )
-          }
+          // prepare for insert tweet
+          queriesValueBatch.tweets.push(
+            tweetValueString(to, country_id)
+          )
 
           // HASHTAGS
           for (const hashtag of hashtags) {
             const hashtagValue = hashtag.text
 
-          if (!hashtagsState.data[hashtagValue]) {
-            const hi = hashtagsState.index
-              hashtagsState.data[hashtagValue] = hi
-              hashtagsState.index = hi + 1
+            if (!hashtagsState.data[hashtagValue]) {
+              const hi = hashtagsState.index
+                hashtagsState.data[hashtagValue] = hi
+                hashtagsState.index = hi + 1
 
-              queriesValueBatch.hashtags.push(
-                format('(%1$L, %2$L)', hi, hashtagValue)
-              )
+                queriesValueBatch.hashtags.push(
+                  format('(%1$L, %2$L)', hi, hashtagValue)
+                )
 
-              queriesValueBatch.tweet_hashtags.push(
-                format('(%1$L, %2$L)', hi, to.id_str)
-              )
-            } else {
-            const existingHashtagId = hashtagsState.data[hashtagValue]
-            queriesValueBatch.tweet_hashtags.push(
-              format('(%1$L, %2$L)', existingHashtagId, to.id_str)
-            )
-            }
+                queriesValueBatch.tweet_hashtags.push(
+                  format('(%1$L, %2$L)', hi, to.id_str)
+                )
+              } else {
+                const existingHashtagId = hashtagsState.data[hashtagValue]
+                queriesValueBatch.tweet_hashtags.push(
+                  format('(%1$L, %2$L)', existingHashtagId, to.id_str)
+                )
+              }
           }
 
           queriesValueBatch.accounts.push(
@@ -140,142 +205,20 @@ async function processLineByLine(fileName, client, hashtagsState, countriesState
           batchCounter += 1
 
           if (batchCounter >= (BATCH_SIZE - 1)) {
-            // 1. EXECUTE BATCH
-            const { 
-              qh_tweets,
-              qt_tweets,
-              tweets,
-              qh_accounts,
-              qt_accounts,
-              accounts,
-              qh_tweet_mentions,
-              qt_tweet_mentions,
-              tweet_mentions,
-              qh_tweet_hashtags,
-              qt_tweet_hashtags,
-              tweet_hashtags,
-              qh_hashtags,
-              qt_hashtags,
-              hashtags,
-              qh_countries,
-              qt_countries,
-              countries 
-            } = queriesValueBatch
-            
-            if (tweets.length > 0) {
-              const q_tweets =  qh_tweets + " " +  tweets.join(", ") +  " " + qt_tweets
-              // console.log(q_tweets) 
-              await client.query(q_tweets)
-            }
-            if (accounts.length > 0) {
-              const q_accounts = qh_accounts + " " + accounts.join(", ") + " " + qt_accounts
-              // console.log(q_accounts) 
-              await client.query(q_accounts)
-            }
-            if (tweet_mentions.length > 0) {
-              const q_tweet_mentions = qh_tweet_mentions + " " + tweet_mentions.join(", ") + " " + qt_tweet_mentions
-              // console.log(q_tweet_mentions) 
-              await client.query(q_tweet_mentions)
-            }
-            if (tweet_hashtags.length > 0) {
-              const q_tweet_hashtags = qh_tweet_hashtags + " " + tweet_hashtags.join(", ") + " " + qt_tweet_hashtags
-              // console.log(q_tweet_hashtags) 
-              await client.query(q_tweet_hashtags)
-            }
-            if (hashtags.length > 0) {
-              const q_hashtags = qh_hashtags + " " + hashtags.join(", ") + " " + qt_hashtags
-              // console.log(q_hashtags) 
-              await client.query(q_hashtags)
-            }
-            if (countries.length > 0) {
-              const q_countries = qh_countries + " " + countries.join(", ") + " " + qt_countries
-              // console.log(q_countries) 
-              await client.query(q_countries)
-            }
-
-            // 2. CLEAN BATCH Queries & COUNTER
+            await executeBatchAndEmpty(client, queriesValueBatch)
             batchCounter = 0
-            
-            queriesValueBatch.tweets = []
-            queriesValueBatch.accounts = []
-            queriesValueBatch.tweet_mentions = []
-            queriesValueBatch.tweet_hashtags = []
-            queriesValueBatch.hashtags = []
-            queriesValueBatch.countries = []
           }
+        }
       }
 
       // PROCESS LAST BATCH
-      // COPY CAT laziness, sorry
-      const {
-        qh_tweets,
-        qt_tweets,
-        tweets,
-        qh_accounts,
-        qt_accounts,
-        accounts,
-        qh_tweet_mentions,
-        qt_tweet_mentions,
-        tweet_mentions,
-        qh_tweet_hashtags,
-        qt_tweet_hashtags,
-        tweet_hashtags,
-        qh_hashtags,
-        qt_hashtags,
-        hashtags,
-        qh_countries,
-        qt_countries,
-        countries
-      } = queriesValueBatch
-
-      if (tweets.length > 0) {
-        const q_tweets = qh_tweets + " " + tweets.join(", ") + " " + qt_tweets
-        // console.log(q_tweets) 
-        await client.query(q_tweets)
+      if (batchCounter > 0) {
+        await executeBatchAndEmpty(client, queriesValueBatch)
       }
-      if (accounts.length > 0) {
-        const q_accounts = qh_accounts + " " + accounts.join(", ") + " " + qt_accounts
-        // console.log(q_accounts) 
-        await client.query(q_accounts)
-      }
-      if (tweet_mentions.length > 0) {
-        const q_tweet_mentions = qh_tweet_mentions + " " + tweet_mentions.join(", ") + " " + qt_tweet_mentions
-        // console.log(q_tweet_mentions) 
-        await client.query(q_tweet_mentions)
-      }
-      if (tweet_hashtags.length > 0) {
-        const q_tweet_hashtags = qh_tweet_hashtags + " " + tweet_hashtags.join(", ") + " " + qt_tweet_hashtags
-        // console.log(q_tweet_hashtags) 
-        await client.query(q_tweet_hashtags)
-      }
-      if (hashtags.length > 0) {
-        const q_hashtags = qh_hashtags + " " + hashtags.join(", ") + " " + qt_hashtags
-        // console.log(q_hashtags) 
-        await client.query(q_hashtags)
-      }
-      if (countries.length > 0) {
-        const q_countries = qh_countries + " " + countries.join(", ") + " " + qt_countries
-        // console.log(q_countries) 
-        await client.query(q_countries)
-      }
-
-      // 2. CLEAN BATCH Queries & COUNTER
-      batchCounter = 0
-
-      queriesValueBatch.tweets = []
-      queriesValueBatch.accounts = []
-      queriesValueBatch.tweet_mentions = []
-      queriesValueBatch.tweet_hashtags = []
-      queriesValueBatch.hashtags = []
-      queriesValueBatch.countries = []
-
     }
     catch (e) {
       console.log(e)
     }
-
-    await fs.promises.writeFile('dump-hashtags-map.json', JSON.stringify(hashtagsState), 'utf-8')
-    await fs.promises.writeFile('dump-countries-map.json', JSON.stringify(countriesState), 'utf-8')
 
     return numOfRecords
 }
@@ -308,11 +251,11 @@ async function main() {
 
 
   // To avoid subselects, store in memory
-  let hashtagsState = {
+  const hashtagsState = {
     index: 1,
     data: {}
   } 
-  let countriesState = {
+  const countriesState = {
     index: 1,
     data: {}
   }
