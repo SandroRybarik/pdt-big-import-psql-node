@@ -33,36 +33,40 @@ async function executeBatchAndEmpty(client, qvb) {
     qh_countries, qt_countries, countries
   } = qvb
 
+  const promises = []
+
   if (tweets.length > 0) {
-    await client.query(
+    promises.push(client.query(
       qh_tweets + " " + tweets.join(", ") + " " + qt_tweets
-    )
+    ))
   }
   if (accounts.length > 0) {
-    await client.query(
+    promises.push(client.query(
       qh_accounts + " " + accounts.join(", ") + " " + qt_accounts
-    )
+    ))
   }
   if (tweet_mentions.length > 0) {
-    await client.query(
+    promises.push(client.query(
       qh_tweet_mentions + " " + tweet_mentions.join(", ") + " " + qt_tweet_mentions
-    )
+    ))
   }
   if (tweet_hashtags.length > 0) {
-    await client.query(
+    promises.push(client.query(
       qh_tweet_hashtags + " " + tweet_hashtags.join(", ") + " " + qt_tweet_hashtags
-    )
+    ))
   }
   if (hashtags.length > 0) {
-    await client.query(
+    promises.push(client.query(
       qh_hashtags + " " + hashtags.join(", ") + " " + qt_hashtags
-    )
+    ))
   }
   if (countries.length > 0) {
-    await client.query(
+    promises.push(client.query(
       qh_countries + " " + countries.join(", ") + " " + qt_countries
-    )
+    ))
   }
+
+  await Promise.allSettled(promises)
 
   // resets all to []
   qvb.tweets = []
